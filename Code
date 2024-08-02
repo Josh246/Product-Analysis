@@ -1,0 +1,116 @@
+WITH main AS (
+SELECT
+PARSE_DATE('%Y%m%d', event_date) AS event_date,
+TIMESTAMP_MICROS(event_timestamp) AS event_timestamp,
+event_name,
+user_pseudo_id,
+event_value_in_usd,
+ROW_NUMBER() OVER(PARTITION BY user_pseudo_id, event_name ORDER BY event_timestamp) AS row_num
+FROM
+`tc-da-1.turing_data_analytics.raw_events`
+WHERE
+event_name IN ('page_view',
+view_item',
+add_to_cart',
+begin_checkout',
+add_shipping_info',
+add_payment_info',
+purchase')
+),
+
+--The day of the week corresponding to the event dates
+dow AS (
+SELECT
+DISTINCT(event_date),
+FORMAT_DATE('%A', event_date) AS day_of_week
+FROM (
+SELECT
+PARSE_DATE('%Y%m%d',event_date) AS event_date
+FROM
+`tc-da-1.turing_data_analytics.raw_events` )
+ORDER BY
+day_of_week
+),
+
+--Selecting the timestamps for the first time each event happens everyday per user
+firsts AS (
+SELECT
+*
+FROM
+main
+WHERE
+row_num = 1
+),
+
+--Selecting the users which have a pageview and a purchase each day
+users AS (
+SELECT
+user_pseudo_id
+FROM
+firsts
+WHERE
+event_name IN ('page_view', 'purchase')
+GROUP BY
+user_pseudo_id,
+event_date
+HAVING
+COUNT(DISTINCT event_name) > 1
+),
+
+--Selecting only the page view and the purchasing from the users by event date
+page_view_purchase AS (
+SELECT
+f.event_date,
+f.user_pseudo_id,
+dow.day_of_week,
+MAX(CASE WHEN f.event_name = 'purchase' THEN event_value_in_usd END) AS value_in_usd,
+MAX(CASE WHEN f.event_name = 'page_view' THEN f.event_timestamp END) AS page_view_timestamp,
+MAX(CASE WHEN f.event_name = 'purchase' THEN f.event_timestamp END) AS purchase_timestamp,
+FROM
+firsts AS f
+JOIN
+users AS u
+ON
+f.user_pseudo_id = u.user_pseudo_id
+JOIN
+dow AS dow
+ON
+dow.event_date = f.event_date
+WHERE
+f.event_name IN ('page_view', 'purchase')
+GROUP BY
+f.event_date,
+f.user_pseudo_id,
+dow.day_of_week
+ORDER BY
+f.event_date
+),
+
+-- --Duration for each user from viewing the page to making their purchase, per day
+duration AS (
+SELECT
+event_date,
+day_of_week,
+user_pseudo_id,
+value_in_usd,
+TIMESTAMP_DIFF(purchase_timestamp, page_view_timestamp, MINUTE) AS purchase_duration
+FROM
+page_view_purchase
+ORDER BY
+event_date,
+user_pseudo_id
+)
+
+--Average of purchase duration per day
+SELECT
+event_date,
+day_of_week,
+ROUND(AVG(value_in_usd), 2) AS avg_usd_value,
+CAST(avg(purchase_duration) AS INT64) AS avg_purchase_duration
+FROM
+duration
+GROUP BY
+event_date,
+day_of_week
+ORDER BY
+event_date
